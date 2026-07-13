@@ -1,4 +1,3 @@
-import { BrowserRouter } from 'react-router-dom'; // Import BrowserRouter for browser history tracking
 import AppRoutes from './routes'; // Import the defined routing layout which lists routes and Sidebar
 
 /**
@@ -7,11 +6,8 @@ import AppRoutes from './routes'; // Import the defined routing layout which lis
  */
 const App = () => {
   return (
-    // BrowserRouter: Connects the browser address bar with the application routes
-    <BrowserRouter>
-      {/* AppRoutes: Main application routing and core page structures */}
-      <AppRoutes />
-    </BrowserRouter>
+    /* AppRoutes: Main application routing and core page structures */
+    <AppRoutes />
   );
 };
 

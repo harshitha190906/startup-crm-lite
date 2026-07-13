@@ -1,13 +1,16 @@
-import { lazy, Suspense, useState, useCallback } from 'react'; // Import lazy for dynamic imports, and Suspense
-import { Routes, Route } from 'react-router-dom'; // Import Routes and Route components
-import Sidebar from '../components/common/Sidebar'; // Import the global Sidebar navigation component
-import Navbar from '../components/common/Navbar'; // Import the top layout Navbar component
+import { lazy, Suspense, useState, useCallback } from 'react';
+import { Routes, Route, Navigate, Outlet } from 'react-router-dom';
+import Sidebar from '../components/common/Sidebar';
+import Navbar from '../components/common/Navbar';
+import { useAuth } from '../context/AuthContext';
 
-// Dynamic dynamic code-splitting imports via React.lazy for route-based performance optimization
-const Dashboard = lazy(() => import('../pages/Dashboard')); // Lazy load the Dashboard page component
-const Leads = lazy(() => import('../pages/Leads')); // Lazy load the Lead Management page component
-const Analytics = lazy(() => import('../pages/Analytics')); // Lazy load the Analytics page component
-const NotFound = lazy(() => import('../pages/NotFound')); // Lazy load the 404 Fallback page component
+// Lazy load route pages to keep initial bundle size lean
+const Dashboard = lazy(() => import('../pages/Dashboard'));
+const Leads     = lazy(() => import('../pages/Leads'));
+const Analytics = lazy(() => import('../pages/Analytics'));
+const Login     = lazy(() => import('../pages/Login'));
+const Register  = lazy(() => import('../pages/Register'));
+const NotFound  = lazy(() => import('../pages/NotFound'));
 
 /**
  * PageLoader component showing a modern, premium loading spinner.
@@ -23,17 +26,40 @@ const PageLoader = () => (
 );
 
 /**
- * AppRoutes component configuring the main page-switching logic.
- * Wraps the route structure with Suspense and integrates the Sidebar globally.
+ * ProtectedRoute component guarding routes requiring credentials.
+ * If authentication state is loading, it outputs the PageLoader.
+ * If user holds a valid session token, it renders the child pages via <Outlet />.
+ * If no session is active, it redirects to /login.
  */
-const AppRoutes = () => {
+const ProtectedRoute = () => {
+  const { token, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="w-screen h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center">
+        <PageLoader />
+      </div>
+    );
+  }
+
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <Outlet />;
+};
+
+/**
+ * ProtectedLayout component that frames pages with Navbar and Sidebar.
+ * Only loaded within ProtectedRoute elements.
+ */
+const ProtectedLayout = () => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const toggleMobileMenu = useCallback(() => setIsMobileMenuOpen((prev) => !prev), []);
   const closeMobileMenu = useCallback(() => setIsMobileMenuOpen(false), []);
 
   return (
-    // Application Layout Wrapper: flex layout layout spacing adjusted for bottom navigation bar on mobile
     <div className="flex flex-col md:flex-row h-screen w-screen bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 overflow-hidden font-sans transition-colors duration-200 pb-16 md:pb-0">
       
       {/* Sidebar Component: Persistent across pages. Handles bottom navigation and left sidebar drawer */}
@@ -47,24 +73,44 @@ const AppRoutes = () => {
         {/* Scrollable Route Content panel */}
         <main className="flex-1 overflow-y-auto bg-[#F8FAFC] dark:bg-slate-900 transition-colors duration-200">
           <Suspense fallback={<PageLoader />}>
-            <Routes>
-              {/* Dashboard route matching exact base path "/" */}
-              <Route path="/" element={<Dashboard />} />
-              
-              {/* Lead Management route matching path "/leads" */}
-              <Route path="/leads" element={<Leads />} />
-              
-              {/* Analytics route matching path "/analytics" */}
-              <Route path="/analytics" element={<Analytics />} />
-              
-              {/* Catch-all route matching any unspecified path, displaying the 404 page */}
-              <Route path="*" element={<NotFound />} />
-            </Routes>
+            <Outlet />
           </Suspense>
         </main>
       </div>
       
     </div>
+  );
+};
+
+/**
+ * AppRoutes component configuring the main page-switching logic.
+ * Segregates public authentication pages from protected layout layouts.
+ */
+const AppRoutes = () => {
+  return (
+    <Suspense fallback={
+      <div className="w-screen h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center">
+        <PageLoader />
+      </div>
+    }>
+      <Routes>
+        {/* Public Authentication routes */}
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+
+        {/* Protected endpoints wrapped in ProtectedRoute & ProtectedLayout */}
+        <Route element={<ProtectedRoute />}>
+          <Route element={<ProtectedLayout />}>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/leads" element={<Leads />} />
+            <Route path="/analytics" element={<Analytics />} />
+          </Route>
+        </Route>
+
+        {/* Catch-all 404 handler */}
+        <Route path="*" element={<NotFound />} />
+      </Routes>
+    </Suspense>
   );
 };
 

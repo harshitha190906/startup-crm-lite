@@ -1,85 +1,207 @@
-import { useCallback } from 'react';
-import { useLocalStorage } from '../hooks/useLocalStorage';
-import { sampleLeads } from '../data/sampleLeads';
-import { LeadContext } from './LeadContext';
+import { useState, useCallback, useEffect } from 'react';
+import toast from 'react-hot-toast';
+import { leadService } from '../services/leadService.js';
+import { LeadContext } from './LeadContext.jsx';
+import { useAuth } from './AuthContext.jsx';
 
-// LocalStorage key for leads database persistence
-const LOCAL_STORAGE_KEY = 'startup-crm-leads';
+// ---------------------------------------------------------------------------
+// src/context/LeadProvider.jsx  (rewritten — backend-connected version)
+//
+// Replaces the old useLocalStorage implementation with real API calls.
+// The context value shape is intentionally kept backward-compatible with
+// all existing components (Dashboard, Leads, Analytics) so nothing breaks.
+//
+// Key design decisions:
+//   • leads array now comes from the API, not localStorage.
+//   • isLoading tracks in-flight requests so components can show spinners.
+//   • pagination carries { total, page, limit, pages } from paginatedResponse.
+//   • fetchLeads(params) is exposed so pages can re-query with different filters.
+//   • addLead / updateLead / deleteLead optimistically reflect changes locally
+//     after the server confirms success, then show a toast.
+// ---------------------------------------------------------------------------
 
 /**
- * LeadProvider component: Context provider that wraps the app tree.
- * Manages leads state persistence under 'startup-crm-leads' and exposes CRUD methods.
+ * LeadProvider — wraps the app tree and owns all lead state.
  *
- * All mutation handlers are wrapped in useCallback to guarantee stable references
- * across renders — prevents unnecessary re-renders of consuming components.
- *
- * @component
- * @param {Object} props - The component properties.
- * @param {React.ReactNode} props.children - Child components to wrap.
- * @returns {React.JSX.Element} The context provider rendering child trees.
+ * @param {{ children: React.ReactNode }} props
  */
 export const LeadProvider = ({ children }) => {
-  const [leads, setLeads] = useLocalStorage(LOCAL_STORAGE_KEY, sampleLeads);
+  const { isAuthenticated } = useAuth();
+  
+  // ── State ─────────────────────────────────────────────────────────────────
+  const [leads,      setLeads]      = useState([]);
+  const [isLoading,  setIsLoading]  = useState(false);
+  const [pagination, setPagination] = useState({ total: 0, page: 1, limit: 20, pages: 0 });
+
+  // ── Fetch ─────────────────────────────────────────────────────────────────
 
   /**
-   * Adds a new lead to the CRM database.
-   * Generates a unique string ID and appends the creation timestamp.
+   * Load leads from the API with optional filter / pagination params.
+   * Called on mount by consuming pages and whenever filters change.
    *
-   * @param {Object} leadData - The raw lead fields from the form.
+   * @param {{ status?: string, search?: string, page?: number, limit?: number, sortBy?: string, sortOrder?: string }} [params={}]
    */
-  const addLead = useCallback((leadData) => {
-    const uniqueId =
-      typeof crypto?.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : Date.now().toString();
+  const fetchLeads = useCallback(async (params = {}) => {
+    setIsLoading(true);
+    try {
+      const result = await leadService.getLeads(params);
+      // result shape: { success, data: [...], pagination: { total, page, limit, pages } }
+      setLeads(result.data ?? []);
+      if (result.pagination) {
+        setPagination(result.pagination);
+      }
+    } catch (error) {
+      const message = error?.response?.data?.message ?? 'Failed to load leads.';
+      toast.error(message);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
-    const newLead = {
-      ...leadData,
-      id: uniqueId,
-      createdAt: new Date().toISOString(),
-    };
+  // ── Auto-fetch triggers ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (isAuthenticated) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      fetchLeads();
+    } else {
+      setLeads([]);
+    }
+  }, [isAuthenticated, fetchLeads]);
 
-    setLeads((prevLeads) => [newLead, ...prevLeads]);
-  }, [setLeads]);
+  // ── Create ────────────────────────────────────────────────────────────────
 
   /**
-   * Updates an existing lead in the CRM database.
-   * Preserves the original ID and creation timestamp.
+   * Create a new lead via the API and prepend it to the local state.
    *
-   * @param {string} id - The unique ID of the target lead.
-   * @param {Object} updatedData - The modified lead fields.
+   * @param {Object} leadData - Lead fields from the form.
+   * @returns {Promise<Object>} The created lead document.
    */
-  const updateLead = useCallback((id, updatedData) => {
-    setLeads((prevLeads) =>
-      prevLeads.map((lead) =>
-        lead.id === id
-          ? { ...lead, ...updatedData, id, createdAt: lead.createdAt }
-          : lead
-      )
-    );
-  }, [setLeads]);
+  const addLead = useCallback(async (leadData) => {
+    try {
+      const result = await leadService.createLead(leadData);
+      const newLead = result.data.lead;
+
+      // Prepend to local list so it appears at the top immediately
+      setLeads((prev) => [newLead, ...prev]);
+      setPagination((prev) => ({ ...prev, total: prev.total + 1 }));
+
+      toast.success('Lead created successfully! 🎉');
+      return newLead;
+    } catch (error) {
+      const message = error?.response?.data?.message ?? 'Failed to create lead.';
+      toast.error(message);
+      throw error; // re-throw so the calling component can reset its loading state
+    }
+  }, []);
+
+  // ── Update ────────────────────────────────────────────────────────────────
 
   /**
-   * Deletes a lead from the CRM database.
+   * Update an existing lead via the API and reflect the change locally.
    *
-   * @param {string} id - The unique ID of the target lead to remove.
+   * @param {string} id       - Lead _id (MongoDB ObjectId string).
+   * @param {Object} leadData - Fields to update.
+   * @returns {Promise<Object>} The updated lead document.
    */
-  const deleteLead = useCallback((id) => {
-    setLeads((prevLeads) => prevLeads.filter((lead) => lead.id !== id));
-  }, [setLeads]);
+  const updateLead = useCallback(async (id, leadData) => {
+    try {
+      const result = await leadService.updateLead(id, leadData);
+      const updatedLead = result.data.lead;
+
+      // Replace the stale entry in-place
+      setLeads((prev) =>
+        prev.map((lead) => (lead._id === id ? updatedLead : lead))
+      );
+
+      toast.success('Lead updated successfully.');
+      return updatedLead;
+    } catch (error) {
+      const message = error?.response?.data?.message ?? 'Failed to update lead.';
+      toast.error(message);
+      throw error;
+    }
+  }, []);
+
+  // ── Status update (lightweight) ───────────────────────────────────────────
 
   /**
-   * Retrieves a single lead object by its unique ID.
+   * Update only the pipeline status of a lead (Kanban / quick actions).
    *
-   * @param {string} id - The target lead ID.
-   * @returns {Object | undefined} The matching lead object or undefined.
+   * @param {string} id     - Lead _id.
+   * @param {string} status - New pipeline status value.
+   * @returns {Promise<Object>} The updated lead document.
+   */
+  const updateLeadStatus = useCallback(async (id, status) => {
+    try {
+      const result = await leadService.updateLeadStatus(id, status);
+      const updatedLead = result.data.lead;
+
+      setLeads((prev) =>
+        prev.map((lead) => (lead._id === id ? updatedLead : lead))
+      );
+
+      toast.success(`Status updated to "${status}".`);
+      return updatedLead;
+    } catch (error) {
+      const message = error?.response?.data?.message ?? 'Failed to update status.';
+      toast.error(message);
+      throw error;
+    }
+  }, []);
+
+  // ── Delete ────────────────────────────────────────────────────────────────
+
+  /**
+   * Delete a lead via the API and remove it from local state.
+   *
+   * @param {string} id - Lead _id.
+   * @returns {Promise<void>}
+   */
+  const deleteLead = useCallback(async (id) => {
+    try {
+      await leadService.deleteLead(id);
+
+      setLeads((prev) => prev.filter((lead) => lead._id !== id));
+      setPagination((prev) => ({ ...prev, total: Math.max(0, prev.total - 1) }));
+
+      toast.success('Lead deleted.');
+    } catch (error) {
+      const message = error?.response?.data?.message ?? 'Failed to delete lead.';
+      toast.error(message);
+      throw error;
+    }
+  }, []);
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * Look up a lead by its MongoDB _id from the local cache.
+   * Avoids an extra API call when the full list is already loaded.
+   *
+   * @param {string} id
+   * @returns {Object|undefined}
    */
   const getLeadById = useCallback((id) => {
-    return leads.find((lead) => lead.id === id);
+    // Support both old string 'id' field and MongoDB '_id'
+    return leads.find((lead) => lead._id === id || lead.id === id);
   }, [leads]);
 
+  // ── Context value ─────────────────────────────────────────────────────────
+
   return (
-    <LeadContext.Provider value={{ leads, addLead, updateLead, deleteLead, getLeadById }}>
+    <LeadContext.Provider
+      value={{
+        leads,
+        isLoading,
+        pagination,
+        fetchLeads,
+        addLead,
+        updateLead,
+        updateLeadStatus,
+        deleteLead,
+        getLeadById,
+      }}
+    >
       {children}
     </LeadContext.Provider>
   );
